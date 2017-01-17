@@ -98,11 +98,12 @@ end
 eval_ew_expr(ex) = (eval(Main, ex); nothing)
 
 # Statically split range [1,N] into equal sized chunks for np processors
-function splitrange(N::Int, np::Int)
+function splitrange(N::Int, wlist::Array)
+    np = length(wlist)
     each = div(N,np)
     extras = rem(N,np)
     nchunks = each > 0 ? np : extras
-    chunks = Array{UnitRange{Int}}(nchunks)
+    chunks = Dict{Int, UnitRange{Int}}()
     lo = 1
     for i in 1:nchunks
         hi = lo + each - 1
@@ -110,28 +111,145 @@ function splitrange(N::Int, np::Int)
             hi += 1
             extras -= 1
         end
-        chunks[i] = lo:hi
+        chunks[wlist[i]] = lo:hi
         lo = hi+1
     end
     return chunks
 end
 
-function preduce(reducer, f, R)
-    N = length(R)
-    chunks = splitrange(N, nworkers())
-    all_w = workers()[1:length(chunks)]
+"""
+    ParallelAccumulator(initial)
 
+Constructs a reducing accumulator designed to be used in conjunction with `@parallel`
+for-loops. Takes a single argument specifying an initial value.
+
+The body of the `@parallel` for-loop can refer to multiple `ParallelAccumulator`s.
+The 0-arg indexation syntax, `[]` is used to fetch from and assign to an accumulator in the loop body.
+For example `acc[] = acc[] + i` will fetch the current, locally accumulated value in `acc`, add
+the value of `i` and set the new accumulated value back in `acc`.
+
+See [`@parallel`](@ref) for more details.
+
+ParallelAccumulators can also be used independent of `@parallel` loops.
+
+```julia
+acc = ParallelAccumulator(1)
+@sync for p in workers()
+    @spawnat p begin
+        for i in 1:10
+            acc[] += 1       # Local accumulation on each worker
+        end
+        push!(acc)           # Explicit push of local accumulation to driver node (typically node 1)
+    end
+end
+reduce(+, acc)
+```
+
+Usage of ParallelAccumulators independent of a `@parallel` construct must observe the following:
+- All remote tasks must be completed before calling `reduce` to retrieve the accumulated value. In the
+  example above, this is achieved by [`@sync`](@ref).
+- `push!(acc)` must be explictly called once on each worker. This pushes the locally accumulated value
+  to the node driving the computation.
+
+Note that the optional `initial` value is used on all workers. For example, if the reducing function is `+`,
+`ParallelAccumulator(25)` will add a total of `25*nworkers()` to the final result.
+"""
+type ParallelAccumulator{T}
+    initial::T
+    value::T
+    workers::Set{Int}       # Used on caller to detect arrival of all parts
+    chnl::RemoteChannel
+    hval::Int               # change hash value to ensure globals are serialized everytime
+
+    ParallelAccumulator(initial, chnl) = new(initial, initial, Set{Int}(), chnl, 0)
+end
+
+ParallelAccumulator{T}() where T  = ParallelAccumulator{T}(zero(T))
+ParallelAccumulator{T}(initial::T) = ParallelAccumulator{T}(initial, RemoteChannel(()->Channel{Tuple}(Inf)))
+
+const pacc_registry=Dict{RRID, Array{ParallelAccumulator}}()
+
+getindex(pacc::ParallelAccumulator) = pacc.value
+setindex!(pacc::ParallelAccumulator, v) = (pacc.value = v)
+
+hash(pacc::ParallelAccumulator, h::UInt) = hash(pacc.hval, hash(pacc.chnl, h))
+
+
+"""
+    push!(pacc::ParallelAccumulator)
+
+Pushes the locally accumulated value to the calling node. Must be called once on each worker
+when a ParallelAccumulator is used independent of a [`@parallel`](@ref) construct.
+"""
+push!(pacc::ParallelAccumulator) = put_nowait!(pacc.chnl, (myid(), pacc.value))
+
+function serialize(s::AbstractSerializer, pacc::ParallelAccumulator)
+    serialize_type(s, typeof(pacc))
+
+    serialize(s, pacc.initial)
+    serialize(s, pacc.chnl)
+    rrid = get(task_local_storage(), :JULIA_PACC_TRACKER, ())
+    serialize(s, rrid)
+
+    destpid = worker_id_from_socket(s.io)
+    push!(pacc.workers, destpid)
+    nothing
+end
+
+function deserialize(s::AbstractSerializer, t::Type{T}) where T <: ParallelAccumulator
+    initial = deserialize(s)
+    chnl = deserialize(s)
+    rrid = deserialize(s)
+
+    pacc = T(initial, chnl)
+
+    global pacc_registry
+    rrid != () && push!(get!(pacc_registry, rrid, []), pacc)
+    pacc
+end
+
+
+"""
+    reduce(op, pacc::ParallelAccumulator)
+
+Performs a final reduction on the calling node of values accumulated by
+a [`@parallel`](@ref) invocation and returns the reduced value.
+"""
+reduce(op, pacc::ParallelAccumulator) = reduce(op, pacc.initial, pacc)
+
+function reduce{T}(op, v0, pacc::ParallelAccumulator{T})
+    length(pacc.workers) == 0 && return pacc.value  # local execution, no workers present
+
+    results = T[]
+    while length(pacc.workers) > 0
+        (pid, v) = take!(pacc.chnl)
+        @assert pid in pacc.workers
+        delete!(pacc.workers, pid)
+        push!(results, v)
+    end
+    pacc.hval += 1
+    pacc.value = reduce(op, v0, results)
+    pacc.value
+end
+
+"""
+    clear!(pacc::ParallelAccumulator)
+
+Clears a ParallelAccumulator object enabling its reuse in a subsequent call.
+"""
+function clear!(pacc::ParallelAccumulator)
+    pacc.value = pacc.initial
+    pacc.hval += 1
+    pacc
+end
+
+function preduce(reducer, f, R)
     w_exec = Task[]
-    for (idx,pid) in enumerate(all_w)
-        t = Task(()->remotecall_fetch(f, pid, reducer, R, first(chunks[idx]), last(chunks[idx])))
-        schedule(t)
+    for (pid, r) in splitrange(length(R), workers())
+        t = @schedule remotecall_fetch(f, pid, reducer, R, first(r), last(r))
         push!(w_exec, t)
     end
     reduce(reducer, [wait(t) for t in w_exec])
-end
-
-function pfor(f, R)
-    [@spawn f(R, first(c), last(c)) for c in splitrange(length(R), nworkers())]
 end
 
 function make_preduce_body(var, body)
@@ -149,11 +267,32 @@ function make_preduce_body(var, body)
     end
 end
 
+function pfor(f, R)
+    lenR = length(R)
+    chunks = splitrange(lenR, workers())
+    rrid = RRID()
+    task_local_storage(:JULIA_PACC_TRACKER, rrid)
+    [remotecall(f, p, R, first(c), last(c), rrid) for (p,c) in chunks]
+end
+
 function make_pfor_body(var, body)
     quote
-        function (R, lo::Int, hi::Int)
-            for $(esc(var)) in R[lo:hi]
-                $(esc(body))
+        function (R, lo::Int, hi::Int, rrid)
+            global pacc_registry
+            pacc_list = get(pacc_registry, rrid, ParallelAccumulator[])
+            delete!(pacc_registry, rrid)
+            try
+                for $(esc(var)) in R[lo:hi]
+                    $(esc(body))
+                end
+            catch e
+                for p2 in pacc_list
+                    put_nowait!(p2.chnl, (0, p2.initial))
+                end
+                rethrow(e)
+            end
+            for p2 in pacc_list
+                put_nowait!(p2.chnl, (myid(), p2.value))
             end
         end
     end
@@ -164,27 +303,56 @@ end
 
 A parallel for loop of the form :
 
-    @parallel [reducer] for var = range
+    @parallel for var = range
         body
     end
 
-The specified range is partitioned and locally executed across all workers. In case an
-optional reducer function is specified, `@parallel` performs local reductions on each worker
-with a final reduction on the calling process.
+The loop is executed in parallel across all workers, with each worker executing a subset
+of the range. The call waits for completion of all iterations on all workers before returning.
+Any updates to variables outside the loop body is not reflected on the calling node.
+However, this is a common requirement and can be achieved in a couple of ways. One, the loop body
+can update shared arrays, wherein the updates are visible on all nodes mapping the array. Second,
+[`ParallelAccumulator`](@ref) objects can be used to collect computed values efficiently.
+The former can be used only on a single node (with multiple workers mapping the same shared segment), while
+the latter can be used when a computation is distributed across nodes.
 
-Note that without a reducer function, `@parallel` executes asynchronously, i.e. it spawns
-independent tasks on all available workers and returns immediately without waiting for
-completion. To wait for completion, prefix the call with [`@sync`](@ref), like :
+```jldoctest
+julia> a = SharedArray{Float64}(4);
 
-    @sync @parallel for var = range
-        body
-    end
+julia> c = 10;
+
+julia> @parallel for i=1:4
+         a[i] = i + c;
+       end
+
+julia> a
+4-element SharedArray{Float64,1}:
+ 11.0
+ 12.0
+ 13.0
+ 14.0
+```
+
+```jldoctest
+julia> acc = ParallelAccumulator(0);
+
+julia> c = 100;
+
+julia> @parallel for i in 1:10
+           j = 2i + c
+           acc[] += j
+       end;
+
+julia> reduce(+, acc)
+1110
+```
 """
 macro parallel(args...)
     na = length(args)
-    if na==1
+    if na == 1
         loop = args[1]
-    elseif na==2
+    elseif na == 2
+        depwarn("@parallel with a reducer is deprecated. Use ParallelAccumulators for reduction.", Symbol("@parallel"))
         reducer = args[1]
         loop = args[2]
     else
@@ -196,11 +364,10 @@ macro parallel(args...)
     var = loop.args[1].args[1]
     r = loop.args[1].args[2]
     body = loop.args[2]
-    if na==1
-        thecall = :(pfor($(make_pfor_body(var, body)), $(esc(r))))
+    if na == 1
+        thecall = :(foreach(wait, pfor($(make_pfor_body(var, body)), $(esc(r)))))
     else
         thecall = :(preduce($(esc(reducer)), $(make_preduce_body(var, body)), $(esc(r))))
     end
     thecall
 end
-
