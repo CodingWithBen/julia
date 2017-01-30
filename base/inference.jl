@@ -162,15 +162,16 @@ type InferenceState
             sp = linfo.sparam_vals
         end
 
-        nslots = length(src.slotnames)
-        src.slottypes = Any[ Any for i = 1:nslots ]
         src.ssavaluetypes = Any[ NF for i = 1:(src.ssavaluetypes::Int) ]
 
         n = length(code)
-        s_types = Any[ () for i = 1:n ]
-        # initial types
-        s_types[1] = Any[ VarState(Bottom, true) for i = 1:nslots ]
         s_edges = Any[ () for i = 1:n ]
+        s_types = Any[ () for i = 1:n ]
+
+        # initial types
+        nslots = length(src.slotnames)
+        s_types[1] = Any[ VarState(Bottom, true) for i = 1:nslots ]
+        src.slottypes = Any[ Bottom for i = 1:nslots ]
 
         atypes = unwrap_unionall(linfo.specTypes)
         nargs::Int = toplevel ? 0 : linfo.def.nargs
@@ -181,13 +182,14 @@ type InferenceState
                     if la > 1
                         atypes = Tuple{Any[Any for i = 1:(la - 1)]..., Tuple.parameters[1]}
                     end
-                    s_types[1][la] = VarState(Tuple, false)
+                    vararg_type = Tuple
                 else
-                    s_types[1][la] = VarState(rewrap(tuple_tfunc(limit_tuple_depth(params,
-                                                                                   tupletype_tail(atypes, la))),
-                                                     linfo.specTypes),
-                                              false)
+                    vararg_type = limit_tuple_depth(params, tupletype_tail(atypes, la))
+                    vararg_type = tuple_tfunc(vararg_type) # returns a Const object, if applicable
+                    vararg_type = rewrap(vararg_type, linfo.specTypes)
                 end
+                s_types[1][la] = VarState(vararg_type, false)
+                src.slottypes[la] = widenconst(vararg_type)
                 la -= 1
             end
         end
@@ -216,9 +218,11 @@ type InferenceState
                 end
                 i == laty && (lastatype = atyp)
                 s_types[1][i] = VarState(atyp, false)
+                src.slottypes[i] = widenconst(atyp)
             end
             for i = (atail + 1):la
                 s_types[1][i] = VarState(lastatype, false)
+                src.slottypes[i] = widenconst(lastatype)
             end
         else
             @assert la == 0 # wrong number of arguments
@@ -252,7 +256,8 @@ type InferenceState
         frame = new(
             sp, nl, inmodule, 0, params,
             linfo, src, min_valid, max_valid,
-            nargs, s_types, s_edges, Union{}, W, 1, n,
+            nargs, s_types, s_edges,
+            Union{}, W, 1, n,
             cur_hand, handler_at, n_handlers,
             ssavalue_uses, ssavalue_init,
             ObjectIdDict(), # Dict{InferenceState, Vector{LineNum}}(),
@@ -1935,7 +1940,7 @@ end
 
 type StateUpdate
     var::Union{Slot,SSAValue}
-    vtype
+    vtype::VarState
     state::VarTable
 end
 
@@ -2619,22 +2624,11 @@ function typeinf_frame(frame)
                     push!(W, l)
                 end
             end
-            if isa(changes, StateUpdate) && isa((changes::StateUpdate).var, SSAValue)
-                # directly forward changes to an SSAValue to the applicable line
-                changes = changes::StateUpdate
-                id = (changes.var::SSAValue).id + 1
-                new = changes.vtype.typ
-                old = frame.src.ssavaluetypes[id]
-                if old === NF || !(new ⊑ old)
-                    frame.src.ssavaluetypes[id] = tmerge(old, new)
-                    for r in frame.ssavalue_uses[id]
-                        if s[r] !== () # s[r] === () => unreached statement
-                            if r < frame.pc´´
-                                frame.pc´´ = r
-                            end
-                            push!(W, r)
-                        end
-                    end
+            if isa(changes, StateUpdate)
+                changes_var = changes.var
+                if isa(changes_var, SSAValue)
+                    # directly forward changes to an SSAValue to the applicable line
+                    record_ssa_assign(changes_var.id + 1, changes.vtype.typ, frame)
                 end
             elseif isa(stmt, GotoNode)
                 pc´ = (stmt::GotoNode).label
@@ -2781,6 +2775,24 @@ function unmark_fixedpoint(frame::InferenceState)
     end
 end
 
+function record_ssa_assign(ssa_id::Int, new::ANY, frame::InferenceState)
+    old = frame.src.ssavaluetypes[ssa_id]
+    if old === NF || !(new ⊑ old)
+        frame.src.ssavaluetypes[ssa_id] = tmerge(old, new)
+        W = frame.ip
+        s = frame.stmt_types
+        for r in frame.ssavalue_uses[ssa_id]
+            if s[r] !== () # s[r] === () => unreached statement
+                if r < frame.pc´´
+                    frame.pc´´ = r
+                end
+                push!(W, r)
+            end
+        end
+    end
+    nothing
+end
+
 
 #### finalize and record the result of running type inference ####
 
@@ -2821,12 +2833,6 @@ function optimize(me::InferenceState)
     @assert me.inworkq
 
     # annotate fulltree with type information
-    gt = me.src.ssavaluetypes
-    for i = 1:length(gt)
-        if gt[i] === NF
-            gt[i] = Union{}
-        end
-    end
     type_annotate!(me)
 
     # run optimization passes on fulltree
@@ -2850,6 +2856,8 @@ function optimize(me::InferenceState)
         force_noinline = popmeta!(me.src.code::Array{Any,1}, :noinline)[1]
         reindex_labels!(me)
     end
+
+    # convert all type information into the form consumed by the code-generator
     widen_all_consts!(me.src)
 
     if isa(me.bestguess, Const) || isconstType(me.bestguess)
@@ -2984,32 +2992,20 @@ function finish(me::InferenceState)
     nothing
 end
 
-function record_slot_type!(id, vt::ANY, slottypes)
-    if vt !== Bottom
-        otherTy = slottypes[id]
-        if otherTy === Bottom
-            slottypes[id] = vt
-        elseif otherTy !== Any && !typeseq(otherTy, vt)
-            slottypes[id] = Any
-        end
-    end
-end
-
 function eval_annotate(e::ANY, vtypes::ANY, sv::InferenceState, undefs::Array{Bool,1}, pass::Int)
     if isa(e, Slot)
         id = slot_id(e)
         s = vtypes[id]
         vt = widenconst(s.typ)
         if pass == 1
-            # first pass: find used-undef variables and type-constant variables
+            # first pass: find used-undef variables
             if s.undef
                 undefs[id] = true
             end
-            record_slot_type!(id, vt, sv.src.slottypes)
             return e
         end
         # second pass: add type annotations where needed
-        return vt === sv.src.slottypes[id] ? e : TypedSlot(id, vt)
+        return sv.src.slottypes[id] <: vt ? e : TypedSlot(id, vt)
     end
 
     if !isa(e,Expr)
@@ -3034,18 +3030,53 @@ function eval_annotate(e::ANY, vtypes::ANY, sv::InferenceState, undefs::Array{Bo
     return e
 end
 
+function record_slot_assign!(sv::InferenceState)
+    # look at all assignments to slots
+    # and union the set of types stored there
+    # to compute an lower bound on the storage required
+    body = sv.src.code::Vector{Any}
+    slottypes = sv.src.slottypes::Vector{Any}
+    for expr in body
+        if isa(expr, Expr) && expr.head === :(=)
+            lhs = expr.args[1]
+            rhs = expr.args[2]
+            if isa(lhs, Slot)
+                id = slot_id(lhs)
+                vt = widenconst(exprtype(rhs, sv.src, sv.mod))
+                if vt !== Bottom
+                    otherTy = slottypes[id]
+                    if otherTy === Bottom
+                        slottypes[id] = vt
+                    elseif otherTy !== Any && !typeseq(otherTy, vt)
+                        slottypes[id] = Any
+                    end
+                end
+            end
+        end
+    end
+end
+
 # annotate types of all symbols in AST
 function type_annotate!(sv::InferenceState)
+    # remove all unused ssa values
+    gt = sv.src.ssavaluetypes
+    for i = 1:length(gt)
+        if gt[i] === NF
+            gt[i] = Union{}
+        end
+    end
+
+    # compute the required type for each slot
+    # to hold all of the items assigned into it
+    record_slot_assign!(sv)
+
+    # annotate variables load types
+    # remove dead code
+    # and compute which variables may be used undef
     src = sv.src
     states = sv.stmt_types
     nargs = sv.nargs
     nslots = length(states[1])
-    for i = 1:nargs
-        src.slottypes[i] = widenconst(states[1][i].typ)
-    end
-    for i = nargs+1:nslots
-        src.slottypes[i] = Bottom
-    end
     undefs = fill(false, nslots)
     body = src.code::Array{Any,1}
     nexpr = length(body)
@@ -3056,12 +3087,6 @@ function type_annotate!(sv::InferenceState)
         if st_i !== ()
             # st_i === ()  =>  unreached statement  (see issue #7836)
             eval_annotate(expr, st_i, sv, undefs, 1)
-            if isa(expr, Expr) && expr.head == :(=) && i < nexpr && isa(expr.args[1], Slot) && states[i + 1] !== ()
-                # record type of assigned slot by looking at the next statement.
-                # this is needed in case the slot is never used (which makes eval_annotate miss it).
-                id = slot_id(expr.args[1])
-                record_slot_type!(id, widenconst(states[i + 1][id].typ), src.slottypes)
-            end
         elseif sv.optimize
             if ((isa(expr, Expr) && is_meta_expr(expr::Expr)) ||
                 isa(expr, LineNumberNode))
@@ -3084,7 +3109,7 @@ function type_annotate!(sv::InferenceState)
         end
     end
 
-    # mark used-undef variables
+    # finish marking used-undef variables
     for i = 1:nslots
         if undefs[i]
             src.slotflags[i] |= Slot_UsedUndef
@@ -3094,23 +3119,50 @@ function type_annotate!(sv::InferenceState)
 end
 
 # widen all Const elements in type annotations
-_widen_all_consts(x::ANY) = x
-_widen_all_consts(x::TypedSlot) = TypedSlot(x.id, widenconst(x.typ))
-function _widen_all_consts(x::Expr)
-    x.typ = widenconst(x.typ)
-    for i = 1:length(x.args)
-        x.args[i] = _widen_all_consts(x.args[i])
+function _widen_all_consts!(e::Expr, untypedload::Vector{Bool})
+    e.typ = widenconst(e.typ)
+    for i = 1:length(e.args)
+        x = e.args[i]
+        if isa(x, Expr)
+            _widen_all_consts!(x, untypedload)
+        elseif isa(x, Slot) && (i != 1 || e.head !== :(=))
+            untypedload[slot_id(x)] = true
+        end
     end
-    return x
+    nothing
 end
 function widen_all_consts!(src::CodeInfo)
     for i = 1:length(src.ssavaluetypes)
         src.ssavaluetypes[i] = widenconst(src.ssavaluetypes[i])
     end
+    nslots = length(src.slottypes)
+    untypedload = fill(false, nslots)
     for i = 1:length(src.code)
-        src.code[i] = _widen_all_consts(src.code[i])
+        x = src.code[i]
+        isa(x, Expr) && _widen_all_consts!(x, untypedload)
+    end
+    for i = 1:nslots
+        src.slottypes[i] = widen_slot_type(src.slottypes[i], untypedload[i])
     end
     return src
+end
+
+# widen all slots to their optimal storage layout
+# we also need to preserve the type for any untyped load
+# since codegen optimizations of functions like `is` need to depend on knowing it
+function widen_slot_type(ty::ANY, untypedload::Bool)
+    if isa(ty, DataType)
+        if untypedload || isbits(ty) || isdefined(ty, :instance)
+            return ty
+        end
+    elseif isa(ty, Union)
+        # TODO: optimized codegen for unions
+    elseif isa(ty, UnionAll)
+        if untypedload
+            return ty
+        end
+    end
+    return Any
 end
 
 # replace slots 1:na with argexprs, static params with spvals, and increment
