@@ -98,7 +98,7 @@ immutable IT
 end
 
 "TA"
-typealias TA Union{T, IT}
+const TA = Union{T, IT}
 
 "@mac()"
 macro mac() end

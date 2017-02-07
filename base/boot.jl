@@ -148,7 +148,7 @@ export
     # constants
     nothing, Main
 
-typealias AnyVector Array{Any,1}
+const AnyVector = Array{Any,1}
 
 abstract Number
 abstract Real     <: Number
@@ -176,9 +176,9 @@ bitstype 128 Int128  <: Signed
 bitstype 128 UInt128 <: Unsigned
 
 if Int === Int64
-    typealias UInt UInt64
+    const UInt = UInt64
 else
-    typealias UInt UInt32
+    const UInt = UInt32
 end
 
 function Typeof end
@@ -299,7 +299,7 @@ convert{T}(::Type{T}, x::T) = x
 cconvert{T}(::Type{T}, x) = convert(T, x)
 unsafe_convert{T}(::Type{T}, x::T) = x
 
-typealias NTuple{N,T} Tuple{Vararg{T,N}}
+NTuple{N,T} = Tuple{Vararg{T,N}}
 
 
 # primitive array constructors

@@ -1035,49 +1035,14 @@ of the inner arrays consists of objects of the same type, but this type may vary
 On the other hand, type `T2` defines a 1-dimensional array of 1-dimensional arrays all of whose inner arrays must have the
 same type.  Note that `T2` is an abstract type, e.g., `Array{Array{Int,1},1} <: T2`, whereas `T1` is a concrete type. As a consequence, `T1` can be constructed with a zero-argument constructor `a=T1()` but `T2` cannot.
 
-## Type Aliases
+There is a convenient syntax for naming such types, similar to the short form of function
+definition syntax:
 
-Sometimes it is convenient to introduce a new name for an already expressible type. For such occasions,
-Julia provides the `typealias` mechanism. For example, `UInt` is type aliased to either `UInt32`
-or `UInt64` as is appropriate for the size of pointers on the system:
-
-```julia
-# 32-bit system:
-julia> UInt
-UInt32
-
-# 64-bit system:
-julia> UInt
-UInt64
+```
+Vector{T} = Array{T,1}
 ```
 
-This is accomplished via the following code in `base/boot.jl`:
-
-```julia
-if Int === Int64
-    typealias UInt UInt64
-else
-    typealias UInt UInt32
-end
-```
-
-Of course, this depends on what `Int` is aliased to -- but that is predefined to be the correct
-type -- either `Int32` or `Int64`.
-
-For parametric types, `typealias` can be convenient for providing names for cases where some of
-the parameter choices are fixed:
-
-```julia
-typealias Vector{T} Array{T,1}
-typealias Matrix{T} Array{T,2}
-```
-
-Writing `Vector{Float64}` is equivalent to writing `Array{Float64,1}`, and the umbrella type
-`Vector` has as instances all `Array` objects where the second parameter -- the number of array
-dimensions -- is 1, regardless of what the element type is. In languages where parametric types
-must always be specified in full, this is not especially helpful, but in Julia, this allows one
-to write just `Matrix` for the abstract type including all two-dimensional dense arrays of any
-element type.
+This is equivalent to `const Vector = Array{T,1} where T`.
 
 ## Operations on Types
 

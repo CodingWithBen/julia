@@ -88,7 +88,7 @@ function complete_keyword(s::String)
         "const", "continue", "do", "else", "elseif", "end", "export", "false",
         "finally", "for", "function", "global", "if", "immutable", "import",
         "importall", "let", "local", "macro", "module", "quote", "return",
-        "true", "try", "type", "typealias", "using", "while"]
+        "true", "try", "type", "using", "while"]
     r = searchsorted(sorted_keywords, s)
     i = first(r)
     n = length(sorted_keywords)

@@ -353,7 +353,7 @@ const builtins = ["abstract", "baremodule", "begin", "bitstype", "break",
                   "elseif", "end", "export", "finally", "for", "function",
                   "global", "if", "immutable", "import", "importall", "let",
                   "local", "macro", "module", "quote", "return", "try", "type",
-                  "typealias", "using", "while"]
+                  "using", "while"]
 
 moduleusings(mod) = ccall(:jl_module_usings, Any, (Any,), mod)
 

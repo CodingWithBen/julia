@@ -637,24 +637,6 @@ See the manual for more details, such as information on inner constructors.
 kw"type"
 
 """
-Introduce a new name for an already expressible type. For example, in `base/boot.jl`,
-`UInt` is type aliased to either `UInt64` or `UInt32` as appropriate for the size of
-pointers on the system:
-
-    if Int === Int64
-        typealias UInt UInt64
-    else
-        typealias UInt UInt32
-    end
-
-For parametric types, `typealias` can be convenient for providing names in cases where
-some parameter choices are fixed.  In `base` for example:
-
-    typealias Vector{T} Array{T,1}
-"""
-kw"typealias"
-
-"""
 `immutable` acts in the same way as `type`, but declares that the fields of the type may
 not be set after construction. See `type` and the manual for more information.
 """

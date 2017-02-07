@@ -617,7 +617,7 @@ finddoc(λ, def) = false
 # Predicates and helpers for `docm` expression selection:
 
 const FUNC_HEADS    = [:function, :stagedfunction, :macro, :(=)]
-const BINDING_HEADS = [:typealias, :const, :global, :(=)]
+const BINDING_HEADS = [:typealias, :const, :global, :(=)]  # deprecation: remove `typealias` post-0.6
 # For the special `:@mac` / `:(Base.@mac)` syntax for documenting a macro after definition.
 isquotedmacrocall(x) =
     isexpr(x, :copyast, 1) &&
@@ -667,7 +667,6 @@ function docm(meta, ex, define = true)
 
     # "Bindings". Names that resolve to objects with different names, ie.
     #
-    #   typealias T S
     #   const T = S
     #   T = S
     #   global T = S
