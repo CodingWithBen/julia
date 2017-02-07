@@ -1226,6 +1226,9 @@ for name in ("alnum", "alpha", "cntrl", "digit", "number", "graph",
     @eval @deprecate ($f)(s::AbstractString) all($f, s)
 end
 
+# reducer mode from `@parallel for` is now deprecated. Should be removed from
+# the implementation in the distributed computing module
+
 # END 0.6 deprecations
 
 # BEGIN 1.0 deprecations

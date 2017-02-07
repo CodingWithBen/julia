@@ -309,7 +309,7 @@ A parallel for loop of the form :
 
 The loop is executed in parallel across all workers, with each worker executing a subset
 of the range. The call waits for completion of all iterations on all workers before returning.
-Any updates to variables outside the loop body is not reflected on the calling node.
+Any updates to variables outside the loop body are not reflected on the calling node.
 However, this is a common requirement and can be achieved in a couple of ways. One, the loop body
 can update shared arrays, wherein the updates are visible on all nodes mapping the array. Second,
 [`ParallelAccumulator`](@ref) objects can be used to collect computed values efficiently.
@@ -322,7 +322,7 @@ julia> a = SharedArray{Float64}(4);
 julia> c = 10;
 
 julia> @parallel for i=1:4
-         a[i] = i + c;
+           a[i] = i + c
        end
 
 julia> a
