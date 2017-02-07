@@ -4302,7 +4302,7 @@ static DISubroutineType
 #else
 static DICompositeType
 #endif
-get_specsig_di(jl_value_t *sig, jl_value_t *jlrettype,
+get_specsig_di(jl_value_t *sig,
 #if JL_LLVM_VERSION >= 30700
     DIFile *topfile,
 #else
@@ -4315,13 +4315,6 @@ get_specsig_di(jl_value_t *sig, jl_value_t *jlrettype,
 #else
     std::vector<Value*> ditypes(0);
 #endif
-    if (jlrettype != (jl_value_t*)jl_void_type) {
-        bool retboxed;
-        Type *rt = julia_type_to_llvm(jlrettype, &retboxed);
-        if (!retboxed && rt != T_void && deserves_sret(jlrettype, rt)) {
-            rt = T_void;
-        }
-    }
     for (size_t i = 0; i < jl_nparams(sig); i++) {
         jl_value_t *jt = jl_tparam(sig, i);
         Type *ty = julia_type_to_llvm(jt);
@@ -4601,7 +4594,7 @@ static std::unique_ptr<Module> emit_function(
             subrty = jl_di_func_sig;
         }
         else {
-            subrty = get_specsig_di(lam->specTypes, jlrettype, topfile, dbuilder);
+            subrty = get_specsig_di(lam->specTypes, topfile, dbuilder);
         }
         SP = dbuilder.createFunction(CU,
                                      dbgFuncName,      // Name
