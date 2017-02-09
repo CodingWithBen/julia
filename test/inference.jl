@@ -611,6 +611,13 @@ function i20343()
     f20343([1,2,3]..., 4)
 end
 @test Base.return_types(i20343, ()) == [Int8]
+immutable Foo20518 <: AbstractVector{Int}; end # issue #20518; inference assumed AbstractArrays
+Base.getindex(::Foo20518, ::Int) = "oops"      # not to lie about their element type
+Base.indices(::Foo20518) = (Base.OneTo(4),)
+foo20518(xs::Any...) = -1
+foo20518(xs::Int...) = [0]
+bar20518(xs) = sum(foo20518(xs...))
+@test bar20518(Foo20518()) == -1
 
 # Inference for some type-level computation
 fUnionAll{T}(::Type{T}) = Type{S} where S <: T
